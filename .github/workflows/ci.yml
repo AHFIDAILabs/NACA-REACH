@@ -1,0 +1,132 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NACA_ENVIRONMENT: "development"
+  NACA_DEBUG: "true"
+  NACA_ANTHROPIC_API_KEY: "test-key"
+  NACA_GCP_PROJECT_ID: "naca-chatbot-test"
+
+jobs:
+  # ── Lint & Type Check ────────────────────────────────────────────────────
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ruff mypy
+          pip install .[dev]
+
+      - name: Run Ruff linter
+        run: ruff check src/ tests/
+
+      - name: Run Ruff formatter check
+        run: ruff format --check src/ tests/
+
+      - name: Run MyPy type check
+        run: mypy src/ --ignore-missing-imports
+
+  # ── Unit Tests ───────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install .[dev]
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --junitxml=test-results.xml \
+            -v
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+      - name: Check coverage threshold (80%)
+        run: |
+          coverage_pct=$(python -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('coverage.xml')
+          rate = float(tree.getroot().attrib['line-rate'])
+          print(int(rate * 100))
+          ")
+          echo "Coverage: ${coverage_pct}%"
+          if [ "$coverage_pct" -lt 80 ]; then
+            echo "::warning::Coverage is below 80% threshold"
+          fi
+
+  # ── Security Scan ────────────────────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install safety bandit
+
+      - name: Run Bandit security linter
+        run: bandit -r src/ -ll --skip B101
+
+      - name: Check dependency vulnerabilities
+        run: pip install . && safety check --output text || true
+
+  # ── Docker Build ─────────────────────────────────────────────────────────
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f infrastructure/docker/Dockerfile \
+            -t naca-chatbot:${{ github.sha }} \
+            .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: naca-chatbot:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: 1
