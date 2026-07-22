@@ -1,0 +1,739 @@
+openapi: "3.0.3"
+info:
+  title: NACA AI Chatbot — Internal API
+  description: |
+    Internal API contracts for the NACA AI-Powered HIV Engagement Chatbot.
+    These APIs are internal service-to-service endpoints, not exposed to the public internet.
+  version: "1.0.0"
+  contact:
+    name: NACA Technical Team
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+  - url: https://api.staging.naca-chatbot.internal
+    description: Staging
+  - url: https://api.naca-chatbot.internal
+    description: Production
+
+tags:
+  - name: Messages
+    description: Core message processing endpoints
+  - name: Sessions
+    description: Session management
+  - name: Escalation
+    description: Human escalation workflows
+  - name: Referrals
+    description: Geospatial facility search
+  - name: Admin - Facilities
+    description: Facility data management (admin only)
+  - name: Analytics
+    description: Analytics event ingestion and reporting
+  - name: Health
+    description: System health checks
+
+paths:
+  # =========================================================================
+  # AI ORCHESTRATOR API (Section 8.1)
+  # =========================================================================
+
+  /v1/message:
+    post:
+      tags: [Messages]
+      summary: Process incoming user message
+      description: |
+        Receives a normalised message from the Channel Abstraction Layer,
+        processes it through the full AI pipeline (NLU → RAG → LLM → Safety),
+        and returns a generated response.
+      operationId: processMessage
+      security:
+        - ServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IncomingMessage"
+      responses:
+        "200":
+          description: Successfully processed message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotResponse"
+        "202":
+          description: Message accepted; escalation triggered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationResponse"
+        "429":
+          description: Rate limited
+        "500":
+          description: Internal processing error
+
+  /v1/session/{session_id}:
+    get:
+      tags: [Sessions]
+      summary: Retrieve session state
+      operationId: getSession
+      security:
+        - ServiceToken: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+        "404":
+          description: Session not found or expired
+
+    delete:
+      tags: [Sessions]
+      summary: Terminate and purge session (NDPA erasure)
+      operationId: deleteSession
+      security:
+        - ServiceToken: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Session purged
+        "404":
+          description: Session not found
+
+  /v1/escalate:
+    post:
+      tags: [Escalation]
+      summary: Manually trigger escalation
+      operationId: triggerEscalation
+      security:
+        - ServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EscalationRequest"
+      responses:
+        "201":
+          description: Escalation ticket created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationTicket"
+        "400":
+          description: Invalid request
+
+  # =========================================================================
+  # REFERRAL SERVICE API (Section 8.2)
+  # =========================================================================
+
+  /v1/referral/search:
+    post:
+      tags: [Referrals]
+      summary: Search nearest facilities
+      description: |
+        Searches for the nearest HIV service facilities based on coordinates 
+        or text location, filtered by service type.
+      operationId: searchFacilities
+      security:
+        - ServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReferralSearchRequest"
+      responses:
+        "200":
+          description: Facilities found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReferralSearchResponse"
+
+  /v1/referral/facility/{facility_id}:
+    get:
+      tags: [Referrals]
+      summary: Get facility details
+      operationId: getFacility
+      security:
+        - ServiceToken: []
+      parameters:
+        - name: facility_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Facility found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Facility"
+        "404":
+          description: Facility not found
+
+  /v1/admin/facility/{facility_id}:
+    put:
+      tags: [Admin - Facilities]
+      summary: Update facility record
+      operationId: updateFacility
+      security:
+        - AdminJWT: []
+      parameters:
+        - name: facility_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FacilityUpdate"
+      responses:
+        "200":
+          description: Facility updated
+        "403":
+          description: Insufficient permissions
+        "404":
+          description: Facility not found
+
+  /v1/admin/facility/bulk-import:
+    post:
+      tags: [Admin - Facilities]
+      summary: Bulk import facilities via CSV
+      operationId: bulkImportFacilities
+      security:
+        - AdminJWT: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                data_source:
+                  type: string
+      responses:
+        "202":
+          description: Import job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportJobStatus"
+
+  # =========================================================================
+  # ANALYTICS API (Section 8.3)
+  # =========================================================================
+
+  /v1/events:
+    post:
+      tags: [Analytics]
+      summary: Ingest interaction events
+      operationId: ingestEvents
+      security:
+        - ServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventBatch"
+      responses:
+        "202":
+          description: Events accepted for processing
+
+  /v1/analytics/summary:
+    get:
+      tags: [Analytics]
+      summary: Get summary metrics
+      operationId: getAnalyticsSummary
+      security:
+        - DashboardJWT: []
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: state
+          in: query
+          schema:
+            type: string
+        - name: channel
+          in: query
+          schema:
+            type: string
+            enum: [whatsapp, telegram]
+      responses:
+        "200":
+          description: Summary metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsSummary"
+
+  # =========================================================================
+  # HEALTH CHECK
+  # =========================================================================
+
+  /v1/health:
+    get:
+      tags: [Health]
+      summary: System health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: System healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+# =============================================================================
+# COMPONENTS
+# =============================================================================
+
+components:
+  securitySchemes:
+    ServiceToken:
+      type: http
+      scheme: bearer
+      description: Internal service-to-service bearer token
+    AdminJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Admin JWT with 1-hour expiry
+    DashboardJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Dashboard access JWT
+
+  schemas:
+    # --- Message Processing ---
+    IncomingMessage:
+      type: object
+      required: [message_id, channel, user_id_hash, text, timestamp]
+      properties:
+        message_id:
+          type: string
+        channel:
+          type: string
+          enum: [whatsapp, telegram]
+        user_id_hash:
+          type: string
+          description: SHA-256 hash of user identifier
+        text:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        language_hint:
+          type: string
+          enum: [en, ha, yo, ig, pcm]
+        media_type:
+          type: string
+          nullable: true
+        location_data:
+          $ref: "#/components/schemas/LocationData"
+        session_id:
+          type: string
+
+    LocationData:
+      type: object
+      properties:
+        latitude:
+          type: number
+          format: double
+        longitude:
+          type: number
+          format: double
+        text_location:
+          type: string
+          description: Free-text location from user
+
+    BotResponse:
+      type: object
+      properties:
+        response_id:
+          type: string
+        session_id:
+          type: string
+        text:
+          type: string
+        language:
+          type: string
+          enum: [en, ha, yo, ig, pcm]
+        response_type:
+          type: string
+          enum: [text, quick_reply, list, referral_card]
+        quick_replies:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              title:
+                type: string
+        referral_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/FacilitySummary"
+        metadata:
+          type: object
+          properties:
+            intent:
+              type: string
+            confidence:
+              type: number
+            model_used:
+              type: string
+              enum: [sonnet, haiku]
+            latency_ms:
+              type: integer
+
+    # --- Escalation ---
+    EscalationRequest:
+      type: object
+      required: [session_id, trigger_type, priority]
+      properties:
+        session_id:
+          type: string
+        trigger_type:
+          type: string
+          enum: [CRISIS_LANGUAGE, POSITIVE_DIAGNOSIS_REACTION, CLINICAL_DECISION_REQUIRED, REPEATED_NON_RESOLUTION, EXPLICIT_REQUEST, SAFEGUARDING_CONCERN]
+        priority:
+          type: string
+          enum: [P1_CRITICAL, P2_HIGH, P3_MEDIUM]
+        trigger_details:
+          type: object
+
+    EscalationResponse:
+      type: object
+      properties:
+        ticket_id:
+          type: string
+          format: uuid
+        holding_message:
+          type: string
+        estimated_wait_minutes:
+          type: integer
+
+    EscalationTicket:
+      type: object
+      properties:
+        ticket_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        priority:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    # --- Session ---
+    SessionState:
+      type: object
+      properties:
+        session_id:
+          type: string
+        channel:
+          type: string
+        language:
+          type: string
+        detected_language:
+          type: string
+        conversation_history:
+          type: array
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+                enum: [user, assistant]
+              content:
+                type: string
+              timestamp:
+                type: string
+                format: date-time
+        escalation_flags:
+          type: array
+          items:
+            type: string
+        referral_state:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        last_active:
+          type: string
+          format: date-time
+
+    # --- Referral ---
+    ReferralSearchRequest:
+      type: object
+      properties:
+        latitude:
+          type: number
+          format: double
+        longitude:
+          type: number
+          format: double
+        text_location:
+          type: string
+        service_type:
+          type: string
+          enum: [HTS, ART, PrEP, PEP, PMTCT, VMMC, OVC, TB, Counselling]
+        radius_km:
+          type: integer
+          default: 25
+        limit:
+          type: integer
+          default: 3
+
+    ReferralSearchResponse:
+      type: object
+      properties:
+        facilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/FacilitySummary"
+        search_radius_km:
+          type: integer
+        total_found:
+          type: integer
+
+    Facility:
+      type: object
+      properties:
+        facility_id:
+          type: string
+          format: uuid
+        facility_name:
+          type: string
+        state:
+          type: string
+        lga:
+          type: string
+        address:
+          type: string
+        latitude:
+          type: number
+        longitude:
+          type: number
+        phone_primary:
+          type: string
+        phone_secondary:
+          type: string
+        email:
+          type: string
+        services:
+          type: array
+          items:
+            type: string
+        operating_days:
+          type: string
+        operating_hours:
+          type: string
+        accepts_walk_in:
+          type: boolean
+        accreditation_status:
+          type: string
+        last_verified_date:
+          type: string
+          format: date
+
+    FacilitySummary:
+      type: object
+      properties:
+        facility_id:
+          type: string
+          format: uuid
+        facility_name:
+          type: string
+        address:
+          type: string
+        phone_primary:
+          type: string
+        services:
+          type: array
+          items:
+            type: string
+        operating_hours:
+          type: string
+        distance_km:
+          type: number
+
+    FacilityUpdate:
+      type: object
+      properties:
+        facility_name:
+          type: string
+        address:
+          type: string
+        latitude:
+          type: number
+        longitude:
+          type: number
+        phone_primary:
+          type: string
+        services:
+          type: array
+          items:
+            type: string
+        operating_hours:
+          type: string
+        accreditation_status:
+          type: string
+
+    ImportJobStatus:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [accepted, processing, completed, failed]
+        records_total:
+          type: integer
+        records_processed:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: string
+
+    # --- Analytics ---
+    EventBatch:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnalyticsEvent"
+
+    AnalyticsEvent:
+      type: object
+      required: [event_type, timestamp]
+      properties:
+        event_type:
+          type: string
+          enum: [message_received, response_sent, referral_requested, escalation_triggered, session_started, session_ended]
+        timestamp:
+          type: string
+          format: date-time
+        session_id_hash:
+          type: string
+        channel:
+          type: string
+        state:
+          type: string
+        language:
+          type: string
+        intent:
+          type: string
+        model_used:
+          type: string
+        latency_ms:
+          type: integer
+        properties:
+          type: object
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        period:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date
+            end:
+              type: string
+              format: date
+        total_conversations:
+          type: integer
+        unique_users:
+          type: integer
+        messages_total:
+          type: integer
+        channel_split:
+          type: object
+          properties:
+            whatsapp:
+              type: integer
+            telegram:
+              type: integer
+        top_intents:
+          type: array
+          items:
+            type: object
+            properties:
+              intent:
+                type: string
+              count:
+                type: integer
+        escalation_rate:
+          type: number
+        avg_response_latency_ms:
+          type: number
+
+    # --- Health ---
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        version:
+          type: string
+        uptime_seconds:
+          type: integer
+        components:
+          type: object
+          properties:
+            database:
+              type: string
+              enum: [up, down]
+            redis:
+              type: string
+              enum: [up, down]
+            vector_db:
+              type: string
+              enum: [up, down]
+            llm_api:
+              type: string
+              enum: [up, down]
